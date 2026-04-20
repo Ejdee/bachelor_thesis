@@ -1,0 +1,62 @@
+# ==============================================================================
+# CA-ALIKED dependencies
+# Python 3.10–3.11 recommended. Python 3.12 is NOT supported by detectron2's
+# pre-built wheels — see the detectron2 note below.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# STEP 1 — Install PyTorch with CUDA 12.1 support FIRST (before everything else)
+# CUDA 12.1 wheels are forward-compatible with CUDA 12.x drivers.
+#
+#   pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+#
+# Do NOT install torch via pip install -r requirements.txt for the torch line;
+# use the command above so the correct CUDA index is used.
+# ------------------------------------------------------------------------------
+#torch==2.1.2 torchvision==0.16.2
+# ------------------------------------------------------------------------------
+# STEP 2 — Install detectron2 FROM SOURCE (no official wheel for Python 3.12).
+# Even on Python 3.10/3.11, the PyPI wheel often mismatches CUDA versions.
+# Building from source avoids this entirely:
+#
+#   pip install 'git+https://github.com/facebookresearch/detectron2.git'
+#
+# Make sure torch is already installed before running the command above.
+# If you get a CUDA version mismatch error, this is almost always the fix.
+# ------------------------------------------------------------------------------
+# detectron2  ← install from source, see above
+
+# ------------------------------------------------------------------------------
+# STEP 3 — Install everything else
+#
+#   pip install -r requirements.txt --ignore-requires-python
+#   (skip torch/torchvision lines if already installed)
+# ------------------------------------------------------------------------------
+
+# 3D reconstruction
+pycolmap>=0.6.0
+
+# Feature matching (used by hloc)
+lightglue @ git+https://github.com/cvg/LightGlue
+
+# Computer vision
+opencv-python>=4.8.0
+kornia>=0.7.0
+
+# Numerical / scientific
+numpy>=1.24.0,<2.0
+scipy>=1.11.0
+
+# Training utilities
+tqdm>=4.65.0
+matplotlib>=3.7.0
+cycler>=0.11.0
+h5py>=3.9.0
+
+# Experiment tracking (required by train_freeze.py)
+clearml>=1.14.0
+
+# Optional — GPU allocation helper used on multi-GPU clusters.
+# Install only if you are running on a shared HPC cluster with safe-gpu.
+# All scripts fall back gracefully if this is not installed.
+# safe-gpu>=1.0.0
