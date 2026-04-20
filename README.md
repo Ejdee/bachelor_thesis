@@ -36,14 +36,36 @@ final/
 
 ## Dependencies
 
+**Step 1 - PyTorch with CUDA 12.1**
+
 ```bash
-pip install torch torchvision
-pip install pycolmap
-pip install detectron2          # see https://detectron2.readthedocs.io/en/latest/tutorials/install.html
-pip install kornia
-pip install clearml
-pip install opencv-python scipy numpy tqdm matplotlib h5py
-pip install git+https://github.com/cvg/LightGlue  # needed by hloc for ALIKED+LightGlue matching
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+CUDA 12.1 wheels are forward-compatible with CUDA 12.x drivers. Install this before everything else.
+
+**Step 2 - detectron2**
+
+detectron2 has no official wheel that reliably matches PyTorch + CUDA versions, so build it from source:
+
+```bash
+git clone https://github.com/facebookresearch/detectron2.git
+python -m pip install -e detectron2
+```
+
+Make sure torch is already installed before this step. If the build fails with a GCC/nvcc version mismatch (common on Ubuntu with system-packaged CUDA), install gcc-11 and point the compiler to it:
+
+```bash
+sudo apt install gcc-11 g++-11
+export CC=gcc-11 CXX=g++-11
+export TORCH_CUDA_ARCH_LIST="7.5"   # adjust to your GPU's compute capability
+python -m pip install -e detectron2
+```
+
+**Step 3 - everything else**
+
+```bash
+pip install -r requirements.txt
 ```
 
 `hloc` and `ALIKED` are included as local copies in this repository and do not need to be installed separately.
@@ -171,7 +193,7 @@ outputs_root/
 | `--batch_size` | `9` | Batch size |
 | `--use_all_gpus` | off | Wrap model in DataParallel |
 
-Checkpoints are saved to `--checkpoint-dir/<clearml_task_id>/` after each epoch. The best-performing checkpoint (epoch 10 in the paper) is named `aliked_ep10_end.pth`.
+Checkpoints are saved to `--checkpoint-dir/<clearml_task_id>/` after each epoch. The best-performing checkpoint (epoch 10 in the thesis) is named `aliked_ep10_end.pth`.
 
 ---
 
