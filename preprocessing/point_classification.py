@@ -9,6 +9,16 @@ import argparse
 import sys
 from tqdm import tqdm
 
+# ==================== CONSTANTS ====================
+RADIUS = 1.5  # Clustering radius multiplier
+MASK_THRESHOLD = 127  # Threshold for binary mask
+MIN_TRACK_LENGTH_RATIO = 0.05  # Minimum track length as fraction of views
+MAX_REPROJECTION_ERROR = 5.0  # Maximum reprojection error for pre-filtering
+MAX_GEOMETRY_ERROR = 2.0  # Maximum reprojection error for geometry check
+MIN_GEOMETRY_TRACK_LENGTH_RATIO = 0.2  # Minimum track length for geometry
+MIN_MODELS_FOR_IMAGE = 4  # Minimum number of models that must see an image
+MASK_DILATION_RADIUS = 15  # Radius for dilating mask
+# ====================================================
 
 def robust_norm(x):
     lo, hi = np.percentile(x, [5, 95])
@@ -25,7 +35,7 @@ def load_mask(img_name, masks_dir):
     if mask_path.exists():
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if mask is not None:
-            return (mask > 127).astype(np.uint8)
+            return (mask > MASK_THRESHOLD).astype(np.uint8)
     return None
 
 
@@ -139,7 +149,7 @@ def main():
         tl = np.array(tl)
         err = np.array(err)
 
-        keep = (tl >= NUM_OF_VIEWS * 0.05) & (err <= 5.0)
+        keep = (tl >= NUM_OF_VIEWS * MIN_TRACK_LENGTH_RATIO) & (err <= MAX_REPROJECTION_ERROR)
         local_ids = np.nonzero(keep)[0]
         filtered_pts.append(pts[keep])
         attr_all.append(
@@ -151,11 +161,11 @@ def main():
     print(f"After pre-filter: {pts_all.shape[0]} points")
 
     # ------------------------------------------------------------------
-    # Spatial clustering via Union-Find (radius = 1.5 × median NN dist)
+    # Spatial clustering via Union-Find (radius = RADIUS × median NN dist)
     # ------------------------------------------------------------------
     tree_all = cKDTree(pts_all)
     d2, _ = tree_all.query(pts_all, k=2)
-    radius = 1.5 * np.median(d2[:, 1])
+    radius = RADIUS * np.median(d2[:, 1])
     print(f"Clustering radius: {radius:.4f}")
 
     parent = np.arange(len(pts_all))
@@ -212,7 +222,7 @@ def main():
     A_n = normalize(agr_all)
 
     S_all = args.tl * T_n + args.rerr * G_n + args.agr * A_n
-    geom_ok = (err_all <= 2.0) & (tl_all >= NUM_OF_VIEWS * 0.2)
+    geom_ok = (err_all <= MAX_GEOMETRY_ERROR) & (tl_all >= NUM_OF_VIEWS * MIN_GEOMETRY_TRACK_LENGTH_RATIO)
     score_ok = S_all >= args.score_thresh
     keep = geom_ok | score_ok
 
@@ -310,7 +320,7 @@ def main():
     image_sets = [{img.name for img in rec.images.values()} for rec in recs.values()]
     all_seen = [name for img_set in image_sets for name in img_set]
     image_counts = Counter(all_seen)
-    common_images = {name for name, count in image_counts.items() if count >= 4}
+    common_images = {name for name, count in image_counts.items() if count >= MIN_MODELS_FOR_IMAGE}
     print(f"Images seen by 4+ models: {len(common_images)}")
 
     # Initialize heatmap and training mask arrays

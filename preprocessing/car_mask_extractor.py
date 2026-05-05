@@ -90,6 +90,7 @@ for img_path in image_files:
 
     car_masks = masks[classes == CAR_CLASS_ID]
 
+    # Select the largest car mask if multiple are detected
     if car_masks.size > 0:
         areas = [np.sum(m) for m in car_masks]
         largest_idx = np.argmax(areas)

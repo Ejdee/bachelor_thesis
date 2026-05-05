@@ -14,7 +14,7 @@ preprocessing/   →   training/   →   evaluation/
 
 ```
 final/
-├── ALIKED/                        ALIKED source (local copy)
+├── ALIKED/                        ALIKED source (clone separately — see Dependencies)
 ├── hloc/                          Hierarchical Localization source (local, modified)
 ├── preprocessing/
 │   ├── run_preprocessing.py       ← single entry-point for the full preprocessing pipeline
@@ -62,13 +62,21 @@ export TORCH_CUDA_ARCH_LIST="7.5"   # adjust to your GPU's compute capability
 python -m pip install -e detectron2
 ```
 
-**Step 3 - everything else**
+**Step 3 - ALIKED**
+
+```bash
+git clone https://github.com/Shiaoming/ALIKED.git ALIKED
+```
+
+Clone ALIKED into the `ALIKED/` directory at the repository root. The code is used as-is with no modifications.
+
+**Step 4 - everything else**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`hloc` and `ALIKED` are included as local copies in this repository and do not need to be installed separately.
+`hloc` is included as a local modified copy and does not need to be installed separately.
 
 ---
 

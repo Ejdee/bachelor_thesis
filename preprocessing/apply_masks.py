@@ -6,6 +6,17 @@ import cv2
 
 
 def apply_mask(image_path, mask_path):
+    """Takes a mask and applies it to an image.
+
+    Args:
+        image_path (Path): Path to the original image.
+        mask_path (Path): Path to the binary mask image.
+    Returns:
+        np.ndarray: The masked image.
+    Raises:
+        FileNotFoundError: If the image or mask file does not exist.
+        ValueError: If the image and mask shapes do not match.
+    """
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Image not found: {image_path}")

@@ -26,6 +26,7 @@ MODELS = {
 
 
 def count_registered_images(recon_path):
+    """Count the number of registered images in a reconstruction."""
     try:
         return len(pycolmap.Reconstruction(recon_path).images)
     except Exception:
