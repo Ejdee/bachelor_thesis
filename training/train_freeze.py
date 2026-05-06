@@ -1,26 +1,23 @@
 import sys
 import argparse
+import random
 from pathlib import Path
-
-# ALIKED source lives in final/ALIKED/
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ALIKED"))
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
 import torchvision.transforms as T
 from tqdm import tqdm
-import torch.nn.functional as F
-import random
-import cv2
-import numpy as np
-from nets.aliked import ALIKED
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from clearml import Task, Logger
 from torch.optim.lr_scheduler import OneCycleLR
+
+from models import TrainableALIKED
+from losses import CarFeaturePunisherLoss
+from datasets import CarKeypointDataset
 
 parser = argparse.ArgumentParser(
     description="Fine-tune the ALIKED detection head on automotive data"
@@ -73,134 +70,9 @@ parser.add_argument(
 args = parser.parse_args()
 
 
-# ------------------------------------------------------------------
-# ClearML experiment tracking
-# ------------------------------------------------------------------
 task = Task.init(project_name="ALIKED-Finetuning", task_name="CA-ALIKED")
 task.connect(args)
 logger = Logger.current_logger()
-
-
-# ------------------------------------------------------------------
-# Loss function
-# ------------------------------------------------------------------
-class CarFeaturePunisherLoss(nn.Module):
-    def __init__(self, pos_weight=1.0, bg_weight=5.0, empty_car_weight=0.5):
-        super().__init__()
-        self.pos_weight = pos_weight
-        self.bg_weight = bg_weight
-        self.empty_car_weight = empty_car_weight
-
-    def forward(self, pred, gt_hmap, train_mask, car_seg):
-        # Verified keypoint region — L2 toward the Gaussian heatmap target
-        pos_mask = (train_mask > 0.5).float() * (gt_hmap > 0.01).float()
-        pos_loss = ((pred - gt_hmap) ** 2 * pos_mask).sum() / (pos_mask.sum() + 1e-6)
-
-        # Background — L1 to drive responses to zero
-        bg_mask = (car_seg < 0.5).float()
-        bg_loss = (torch.abs(pred) * bg_mask).sum() / (bg_mask.sum() + 1e-6)
-
-        # Unverified vehicle surface — soft L2 penalty (regularizer)
-        empty_mask = (car_seg > 0.5).float() * (gt_hmap <= 0.01).float()
-        empty_loss = (pred**2 * empty_mask).sum() / (empty_mask.sum() + 1e-6)
-
-        return (
-            self.pos_weight * pos_loss
-            + self.bg_weight * bg_loss
-            + self.empty_car_weight * empty_loss
-        )
-
-
-# ------------------------------------------------------------------
-# Model — ALIKED with frozen backbone and descriptor head
-# ------------------------------------------------------------------
-class TrainableALIKED(nn.Module):
-    def __init__(self, device="cuda"):
-        super().__init__()
-        self.net = ALIKED(
-            model_name="aliked-n32", device=device, top_k=-1, scores_th=0.0, n_limit=0
-        )
-
-        for param in self.net.parameters():
-            param.requires_grad = False
-        for name, param in self.net.named_parameters():
-            if "score_head" in name:
-                param.requires_grad = True
-
-        trainable = [n for n, p in self.net.named_parameters() if p.requires_grad]
-        print(f"Trainable parameters ({len(trainable)}):")
-        for n in trainable:
-            print(f"  {n}")
-
-    def forward(self, x):
-        feature_map, score_map = self.net.extract_dense_map(x)
-        desc_map = F.normalize(feature_map, p=2, dim=1)
-        h, w = x.shape[2] // 8, x.shape[3] // 8
-        desc_map = F.interpolate(
-            desc_map, size=(h, w), mode="bilinear", align_corners=False
-        )
-        score_map = F.interpolate(
-            score_map,
-            size=(x.shape[2], x.shape[3]),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return score_map, desc_map
-
-
-# ------------------------------------------------------------------
-# Dataset
-# ------------------------------------------------------------------
-class CarKeypointDataset(torch.utils.data.Dataset):
-    def __init__(
-        self, img_dir, masked_img_dir, label_dir, mask_dir, target_size=(1980, 1080)
-    ):
-        heatmap_files = sorted(Path(label_dir).glob("*.npy"))
-        valid_stems = {f.stem for f in heatmap_files}
-        all_imgs = sorted(
-            list(Path(img_dir).glob("*.png")) + list(Path(img_dir).glob("*.jpg"))
-        )
-        self.imgs = [p for p in all_imgs if p.stem in valid_stems]
-        print(f"  {len(heatmap_files)} heatmaps found → {len(self.imgs)} images loaded")
-
-        self.masked_img_dir = Path(masked_img_dir)
-        self.label_dir = Path(label_dir)
-        self.mask_dir = Path(mask_dir)
-        self.target_size = target_size
-
-    def __len__(self):
-        return len(self.imgs)
-
-    def __getitem__(self, idx):
-        img_path = self.imgs[idx]
-        hmap_path = self.label_dir / f"{img_path.stem}.npy"
-        mask_path = self.mask_dir / f"{img_path.stem}.npy"
-
-        img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-
-        masked_path = self.masked_img_dir / img_path.name
-        if masked_path.exists():
-            img_m = cv2.imread(str(masked_path), cv2.IMREAD_GRAYSCALE)
-            car_seg = (img_m > 0).astype(np.float32)
-        else:
-            car_seg = np.ones(img.shape[:2], dtype=np.float32)
-
-        hmap = np.load(hmap_path).astype(np.float32)
-        train_mask = np.load(mask_path).astype(np.float32)
-
-        W, H = self.target_size
-        img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
-        car_seg = cv2.resize(car_seg, (W, H), interpolation=cv2.INTER_NEAREST)
-        train_mask = cv2.resize(train_mask, (W, H), interpolation=cv2.INTER_NEAREST)
-        hmap = cv2.resize(hmap, (W, H), interpolation=cv2.INTER_LINEAR)
-
-        return (
-            torch.from_numpy(img).permute(2, 0, 1),
-            torch.from_numpy(hmap).unsqueeze(0),
-            torch.from_numpy(train_mask).unsqueeze(0),
-            torch.from_numpy(car_seg).unsqueeze(0),
-        )
 
 
 # ------------------------------------------------------------------
