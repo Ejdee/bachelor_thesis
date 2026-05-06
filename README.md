@@ -73,7 +73,12 @@ detectron2 has no official wheel that reliably matches PyTorch + CUDA versions, 
 
 ```bash
 git clone https://github.com/facebookresearch/detectron2.git
-python -m pip install -e detectron2
+python -m pip install -e detectron2 --no-build-isolation  
+```
+or
+```bash
+git clone https://github.com/facebookresearch/detectron2.git
+MAX_JOBS=1 python -m pip install -e detectron2 --no-build-isolation  
 ```
 
 Make sure torch is already installed before this step. If the build fails with a GCC/nvcc version mismatch (common on Ubuntu with system-packaged CUDA), install gcc-11 and point the compiler to it:
@@ -82,7 +87,7 @@ Make sure torch is already installed before this step. If the build fails with a
 sudo apt install gcc-11 g++-11
 export CC=gcc-11 CXX=g++-11
 export TORCH_CUDA_ARCH_LIST="7.5"   # adjust to your GPU's compute capability
-python -m pip install -e detectron2
+python -m pip install -e detectron2 --no-build-isolation
 ```
 
 **Step 3 - ALIKED**

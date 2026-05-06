@@ -11,17 +11,12 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import cv2
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pycolmap
 import torch
-from cycler import cycler
 from tqdm import tqdm
 
-# hloc lives in final/hloc/
+# hloc lives in src/hloc/
 _HLOC_DIR = Path(__file__).resolve().parents[1] / "hloc"
 if str(_HLOC_DIR) not in sys.path:
     sys.path.insert(0, str(_HLOC_DIR))
@@ -69,18 +64,16 @@ def parse_extractor_list(raw: str) -> List[str]:
 
 
 def resolve_image_path(directory: Path, name: str) -> Path | None:
+    """Find an image file by name, falling back to any extension if the exact path is missing."""
     candidate = directory / name
     if candidate.exists():
         return candidate
-
-    stem = Path(name).stem
-    matches = sorted(directory.glob(f"{stem}.*"))
-    if matches:
-        return matches[0]
-    return None
+    matches = sorted(directory.glob(f"{Path(name).stem}.*"))
+    return matches[0] if matches else None
 
 
 def load_entries(image_dir: Path, gt_dir: Path) -> List[ImageEntry]:
+    """Load image entries from a COLMAP reconstruction, skipping any images not found on disk."""
     reconstruction = pycolmap.Reconstruction(gt_dir)
     entries: List[ImageEntry] = []
     missing: List[str] = []
@@ -91,7 +84,6 @@ def load_entries(image_dir: Path, gt_dir: Path) -> List[ImageEntry]:
         if image_path is None:
             missing.append(name)
             continue
-
         entries.append(
             ImageEntry(
                 name=name,
@@ -108,74 +100,42 @@ def load_entries(image_dir: Path, gt_dir: Path) -> List[ImageEntry]:
     return entries
 
 
+def _resize_to_max(image: np.ndarray, max_size: int) -> Tuple[np.ndarray, float]:
+    """Downscale an image so its longest side does not exceed max_size, preserving aspect ratio."""
+    h, w = image.shape[:2]
+    scale = min(1.0, max_size / max(h, w))
+    if scale < 1.0:
+        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    return image, scale
+
+
 def read_image_tensor(
     image_path: Path, grayscale: bool, max_size: int = 3200
 ) -> Tuple[torch.Tensor, Tuple[int, int], float]:
-    if grayscale:
-        image_gray = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-        if image_gray is None:
-            raise RuntimeError(f"Failed to read image: {image_path}")
-        original_height, original_width = image_gray.shape[:2]
-        scale = min(1.0, max_size / max(original_height, original_width))
-        if scale < 1.0:
-            new_height = int(original_height * scale)
-            new_width = int(original_width * scale)
-            image_gray = cv2.resize(
-                image_gray, (new_width, new_height), interpolation=cv2.INTER_AREA
-            )
-        image_tensor = torch.from_numpy(image_gray).float().unsqueeze(0) / 255.0
-        return image_tensor, (original_height, original_width), scale
-
-    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    if image_bgr is None:
+    """Read an image from disk, optionally downscale it, and return a normalised float tensor."""
+    flag = cv2.IMREAD_GRAYSCALE if grayscale else cv2.IMREAD_COLOR
+    img = cv2.imread(str(image_path), flag)
+    if img is None:
         raise RuntimeError(f"Failed to read image: {image_path}")
-    original_height, original_width = image_bgr.shape[:2]
-    scale = min(1.0, max_size / max(original_height, original_width))
-    if scale < 1.0:
-        new_height = int(original_height * scale)
-        new_width = int(original_width * scale)
-        image_bgr = cv2.resize(
-            image_bgr, (new_width, new_height), interpolation=cv2.INTER_AREA
-        )
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    image_tensor = torch.from_numpy(image_rgb.transpose(2, 0, 1)).float() / 255.0
-    return image_tensor, (original_height, original_width), scale
+
+    orig_h, orig_w = img.shape[:2]
+    img, scale = _resize_to_max(img, max_size)
+
+    if grayscale:
+        tensor = torch.from_numpy(img).float().unsqueeze(0) / 255.0
+    else:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        tensor = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
+
+    return tensor, (orig_h, orig_w), scale
 
 
 def build_extractor(spec: ModelSpec, device: torch.device):
+    """Instantiate and move a feature extractor to the target device, set to eval mode."""
     conf = {"name": spec.extractor_name, **spec.extractor_conf}
     model = dynamic_load(extractors, spec.extractor_name)
     return model(conf).eval().to(device)
 
-
-def infer_aliked_model_name_from_weights(weight_path: Path) -> str:
-    payload = torch.load(weight_path, map_location="cpu")
-    state_dict = (
-        payload.get("state_dict", payload) if isinstance(payload, dict) else payload
-    )
-    if not isinstance(state_dict, dict):
-        raise RuntimeError(f"Unexpected checkpoint format in {weight_path}")
-
-    cleaned_state: Dict[str, torch.Tensor] = {}
-    for key, value in state_dict.items():
-        if isinstance(key, str):
-            normalized_key = key[len("net.") :] if key.startswith("net.") else key
-            cleaned_state[normalized_key] = value
-
-    probe_key = "desc_head.agg_weights"
-    if probe_key not in cleaned_state:
-        raise RuntimeError(
-            f"Could not infer ALIKED architecture: missing '{probe_key}' in {weight_path}"
-        )
-
-    channels = int(cleaned_state[probe_key].shape[0])
-    if channels == 16:
-        return "aliked-n16"
-    if channels == 32:
-        return "aliked-n32"
-    raise RuntimeError(
-        f"Unsupported ALIKED descriptor head channels ({channels}) in {weight_path}."
-    )
 
 
 def limit_features_by_budget(
@@ -184,31 +144,37 @@ def limit_features_by_budget(
     scores: np.ndarray,
     max_keypoints: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Retain only the top-scoring keypoints up to max_keypoints, keeping descriptors in sync."""
     if max_keypoints <= 0 or keypoints.shape[0] <= max_keypoints:
         return keypoints, descriptors, scores
 
     if scores.shape[0] != keypoints.shape[0] or np.allclose(scores, scores[0]):
+        # Scores are missing or all equal -> just take the first N keypoints
         selected = np.arange(max_keypoints, dtype=np.int64)
     else:
         selected = np.argpartition(scores, -max_keypoints)[-max_keypoints:]
         selected = selected[np.argsort(scores[selected])[::-1]]
 
-    keypoints_limited = keypoints[selected]
-    scores_limited = scores[selected]
-
+    # Descriptors can be (N, D) or (D, N) depending on the extractor.
     if descriptors.shape[0] == keypoints.shape[0]:
-        descriptors_limited = descriptors[selected]
+        desc_sel = descriptors[selected]
     elif descriptors.ndim > 1 and descriptors.shape[1] == keypoints.shape[0]:
-        descriptors_limited = descriptors[:, selected]
+        desc_sel = descriptors[:, selected]
     else:
         raise ValueError(
             f"Cannot slice descriptors of shape {descriptors.shape} with {keypoints.shape[0]} keypoints."
         )
 
-    return keypoints_limited, descriptors_limited, scores_limited
+    return keypoints[selected], desc_sel, scores[selected]
 
 
 def descriptors_to_nxd(descriptors: np.ndarray, num_keypoints: int) -> np.ndarray:
+    """Ensure descriptors are in (N, D) layout, transposing if the extractor returns (D, N).
+
+    Different extractors use different conventions: some output (N, D) where each
+    row is a descriptor, others output (D, N) where each column is a descriptor.
+    OpenCV's BFMatcher expects (N, D), so we normalise here.
+    """
     if descriptors.ndim != 2:
         raise ValueError(f"Expected 2D descriptors, got {descriptors.shape}")
     if descriptors.shape[0] == num_keypoints:
@@ -228,6 +194,7 @@ def extract_features_for_entries(
     device: torch.device,
     max_keypoints: int,
 ) -> Dict[str, Dict[str, np.ndarray]]:
+    """Run the extractor over every image entry and collect keypoints, descriptors, and scores."""
     outputs: Dict[str, Dict[str, np.ndarray]] = {}
     total_keypoints = 0
 
@@ -239,20 +206,21 @@ def extract_features_for_entries(
         prediction = extractor({"image": image_tensor})
 
         keypoints = prediction["keypoints"][0].detach().cpu().numpy().astype(np.float64)
+        # The extractor ran on a downscaled image, so keypoints are in downscaled
+        # pixel coordinates. Divide by scale to bring them back to the original resolution.
         if scale < 1.0:
             keypoints = keypoints / scale
 
-        descriptors = (
-            prediction["descriptors"][0].detach().cpu().numpy().astype(np.float32)
-        )
+        descriptors = prediction["descriptors"][0].detach().cpu().numpy().astype(np.float32)
+
         score_tensor = prediction.get("scores", None)
         if score_tensor is None:
+            # Not all extractors produce per-keypoint scores (e.g. SIFT)
             scores = np.zeros(keypoints.shape[0], dtype=np.float32)
         else:
-            scores = (
-                score_tensor[0].detach().cpu().numpy().astype(np.float32).reshape(-1)
-            )
+            scores = score_tensor[0].detach().cpu().numpy().astype(np.float32).reshape(-1)
         if scores.shape[0] != keypoints.shape[0]:
+            # unexpected score shape - fallback to zeros
             scores = np.zeros(keypoints.shape[0], dtype=np.float32)
 
         keypoints, descriptors, scores = limit_features_by_budget(
@@ -262,7 +230,6 @@ def extract_features_for_entries(
             max_keypoints=max_keypoints,
         )
         total_keypoints += int(keypoints.shape[0])
-
         outputs[entry.name] = {
             "keypoints": keypoints,
             "descriptors": descriptors,
@@ -270,11 +237,29 @@ def extract_features_for_entries(
             "shape": np.array(original_shape, dtype=np.int32),
         }
 
-    average_keypoints = total_keypoints / max(1, len(entries))
-    print(
-        f"  -> Total keypoints kept: {total_keypoints} ({average_keypoints:.1f} per image)"
-    )
+    avg = total_keypoints / max(1, len(entries))
+    print(f"  -> Total keypoints kept: {total_keypoints} ({avg:.1f} per image)")
     return outputs
+
+
+def _ratio_pass(
+    matcher: cv2.BFMatcher,
+    query: np.ndarray,
+    train: np.ndarray,
+    ratio: float,
+) -> Dict[int, int]:
+    """Run a single-direction kNN ratio test and return surviving query->train index pairs.
+
+    For each query descriptor the two nearest neighbours in train are found.
+    A match is kept only if the closest neighbour is better than
+    the second-closest (Lowe's ratio test). This rejects ambiguous matches where
+    two descriptors look equally similar.
+    """
+    result: Dict[int, int] = {}
+    for pair in matcher.knnMatch(query, train, k=2):
+        if len(pair) == 2 and pair[0].distance < ratio * pair[1].distance:
+            result[pair[0].queryIdx] = pair[0].trainIdx
+    return result
 
 
 def mutual_ratio_match(
@@ -282,39 +267,24 @@ def mutual_ratio_match(
     descriptors_right: np.ndarray,
     ratio: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Match descriptors with symmetric nearest-neighbour ratio test, keeping only mutual matches.
+
+    Two passes are run: left -> right and right -> left. A pair (i, j) is kept only
+    when both passes agree.
+    """
     if descriptors_left.shape[0] < 2 or descriptors_right.shape[0] < 2:
         return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
     matcher = cv2.BFMatcher(cv2.NORM_L2)
+    forward = _ratio_pass(matcher, descriptors_left, descriptors_right, ratio)
+    backward = _ratio_pass(matcher, descriptors_right, descriptors_left, ratio)
 
-    knn_left_to_right = matcher.knnMatch(descriptors_left, descriptors_right, k=2)
-    forward: Dict[int, int] = {}
-    for pair in knn_left_to_right:
-        if len(pair) < 2:
-            continue
-        first, second = pair
-        if first.distance < ratio * second.distance:
-            forward[first.queryIdx] = first.trainIdx
-
-    knn_right_to_left = matcher.knnMatch(descriptors_right, descriptors_left, k=2)
-    backward: Dict[int, int] = {}
-    for pair in knn_right_to_left:
-        if len(pair) < 2:
-            continue
-        first, second = pair
-        if first.distance < ratio * second.distance:
-            backward[first.queryIdx] = first.trainIdx
-
-    idx_left: List[int] = []
-    idx_right: List[int] = []
-    for left_index, right_index in forward.items():
-        if backward.get(right_index, -1) == left_index:
-            idx_left.append(left_index)
-            idx_right.append(right_index)
+    # Keep only pairs where the reverse match agrees.
+    idx_left = [l for l, r in forward.items() if backward.get(r, -1) == l]
+    idx_right = [forward[l] for l in idx_left]
 
     if not idx_left:
         return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-
     return np.asarray(idx_left, dtype=np.int64), np.asarray(idx_right, dtype=np.int64)
 
 
@@ -323,27 +293,23 @@ def match_features(
     feat_right: Dict[str, np.ndarray],
     ratio: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    keypoints_left = feat_left["keypoints"]
-    keypoints_right = feat_right["keypoints"]
-    if keypoints_left.shape[0] < 8 or keypoints_right.shape[0] < 8:
+    """Match two feature sets and return the corresponding 2-D point arrays."""
+    kp_left = feat_left["keypoints"]
+    kp_right = feat_right["keypoints"]
+    if kp_left.shape[0] < 8 or kp_right.shape[0] < 8:
         return np.empty((0, 2)), np.empty((0, 2))
 
-    descriptors_left = descriptors_to_nxd(
-        feat_left["descriptors"], keypoints_left.shape[0]
-    )
-    descriptors_right = descriptors_to_nxd(
-        feat_right["descriptors"], keypoints_right.shape[0]
-    )
-    idx_left, idx_right = mutual_ratio_match(
-        descriptors_left, descriptors_right, ratio=ratio
-    )
+    desc_left = descriptors_to_nxd(feat_left["descriptors"], kp_left.shape[0])
+    desc_right = descriptors_to_nxd(feat_right["descriptors"], kp_right.shape[0])
+    idx_left, idx_right = mutual_ratio_match(desc_left, desc_right, ratio=ratio)
+
     if idx_left.size < 8:
         return np.empty((0, 2)), np.empty((0, 2))
-
-    return keypoints_left[idx_left], keypoints_right[idx_right]
+    return kp_left[idx_left], kp_right[idx_right]
 
 
 def normalize_keypoints(camera: pycolmap.Camera, keypoints: np.ndarray) -> np.ndarray:
+    """Unproject pixel coordinates to normalised camera-space rays using the camera model."""
     normalized = np.asarray(camera.cam_from_img(keypoints), dtype=np.float64)
     if normalized.ndim != 2 or normalized.shape[1] != 2:
         raise RuntimeError("camera.cam_from_img did not return an Nx2 array")
@@ -353,6 +319,7 @@ def normalize_keypoints(camera: pycolmap.Camera, keypoints: np.ndarray) -> np.nd
 def ground_truth_relative_pose(
     left: ImageEntry, right: ImageEntry
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute the ground-truth relative rotation and translation from left to right camera."""
     right_from_left = right.cam_from_world * left.cam_from_world.inverse()
     rotation_gt = np.asarray(right_from_left.rotation.matrix(), dtype=np.float64)
     translation_gt = np.asarray(right_from_left.translation, dtype=np.float64)
@@ -360,12 +327,26 @@ def ground_truth_relative_pose(
 
 
 def angle_error_mat(rotation_1: np.ndarray, rotation_2: np.ndarray) -> float:
+    """Compute the geodesic angular distance in degrees between two rotation matrices.
+
+    The relative rotation R_rel = R1^T @ R2 maps from frame 2 into frame 1.
+    Its rotation angle is recovered via the trace identity:
+        cos(angle) = (trace(R_rel) - 1) / 2
+    which comes from the fact that for any rotation matrix, the trace equals
+    1 + 2*cos(angle). We clip to [-1, 1] to guard against floating-point drift.
+    """
     cos_angle = (np.trace(rotation_1.T @ rotation_2) - 1.0) / 2.0
     cos_angle = np.clip(cos_angle, -1.0, 1.0)
     return float(np.degrees(np.abs(np.arccos(cos_angle))))
 
 
 def angle_error_vec(vector_1: np.ndarray, vector_2: np.ndarray) -> float:
+    """Compute the angular difference in degrees between two direction vectors.
+
+    Used for the translation error: the recovered translation is only known up
+    to scale and sign, so the caller handles the 180° ambiguity separately.
+    Returns inf if either vector is near-zero (degenerate case).
+    """
     norm = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
     if norm <= 1e-12:
         return float("inf")
@@ -382,25 +363,43 @@ def estimate_pose_error_from_points(
     ransac_confidence: float,
     ransac_max_iters: int,
 ) -> float:
+    """Estimate relative pose via F-RANSAC and return the max of rotation and translation errors in degrees.
+
+    Pipeline:
+      1. Normalise pixel coordinates using camera intrinsics (undistort + unproject).
+      2. Run RANSAC to estimate the fundamental matrix F in pixel space.
+      3. Convert F to the essential matrix E using the calibration matrices K.
+      4. Decompose E into (R, t) via recoverPose, which also resolves the sign ambiguity.
+      5. Compare against the ground-truth relative pose and return the larger of the
+         rotation error and translation error (the standard IMC benchmark metric).
+    """
     if points_left.shape[0] < 8 or points_right.shape[0] < 8:
         return float("inf")
 
+    # Step 1 - normalise pixels to camera-space rays using the camera models.
+    # Points with non-finite coordinates after undistortion are discarded.
     try:
         points_left_normalized = normalize_keypoints(left.camera, points_left)
         points_right_normalized = normalize_keypoints(right.camera, points_right)
     except Exception:
         return float("inf")
 
-    valid = np.isfinite(points_left_normalized).all(axis=1) & np.isfinite(
-        points_right_normalized
-    ).all(axis=1)
+    valid = (
+        np.isfinite(points_left_normalized).all(axis=1)
+        & np.isfinite(points_right_normalized).all(axis=1)
+    )
     points_left = points_left[valid]
     points_right = points_right[valid]
     points_left_normalized = points_left_normalized[valid]
     points_right_normalized = points_right_normalized[valid]
+
     if points_left_normalized.shape[0] < 8:
         return float("inf")
 
+    # Step 2 - estimate the fundamental matrix F with RANSAC.
+    # F maps a point in the left image to its epipolar line in the right image.
+    # We use the pixel coordinates here because the threshold is in pixels.
+    # The outer try/except handles older OpenCV versions that don't accept maxIters.
     try:
         fundamental, mask = cv2.findFundamentalMat(
             points_left,
@@ -427,12 +426,13 @@ def estimate_pose_error_from_points(
     if fundamental is None or mask is None:
         return float("inf")
 
+    # OpenCV can return multiple stacked 3x3 matrices when the scene is degenerate.
+    # We collect all candidates and pick the best one below.
     if fundamental.shape == (3, 3):
         fundamental_candidates = [fundamental]
     elif fundamental.shape[1] == 3 and fundamental.shape[0] % 3 == 0:
         fundamental_candidates = [
-            fundamental[index : index + 3]
-            for index in range(0, fundamental.shape[0], 3)
+            fundamental[i: i + 3] for i in range(0, fundamental.shape[0], 3)
         ]
     else:
         return float("inf")
@@ -441,17 +441,26 @@ def estimate_pose_error_from_points(
     if inlier_mask.sum() < 5:
         return float("inf")
 
-    calibration_left = np.asarray(left.camera.calibration_matrix(), dtype=np.float64)
-    calibration_right = np.asarray(right.camera.calibration_matrix(), dtype=np.float64)
+    # Step 3 - convert F to the essential matrix E.
+    # The relationship is:  E = K_right^T @ F @ K_left
+    # E encodes the same epipolar geometry but in normalised (calibrated) coordinates,
+    # which allows decomposing it into a pure rotation + translation.
+    K_left = np.asarray(left.camera.calibration_matrix(), dtype=np.float64)
+    K_right = np.asarray(right.camera.calibration_matrix(), dtype=np.float64)
 
     best_rotation = None
     best_translation = None
     best_inlier_count = -1
 
-    for fundamental_candidate in fundamental_candidates:
-        essential = calibration_right.T @ fundamental_candidate @ calibration_left
+    for F in fundamental_candidates:
+        essential = K_right.T @ F @ K_left
+
+        # Step 4 - decompose E into (R (rotation), t (translation)).
+        # recoverPose tries the four possible (R, t) solutions and picks the one
+        # where the most inlier points project in front of both cameras (positive depth).
+        # Normalised coordinates are passed so we use identity as the camera matrix.
         try:
-            inlier_count, rotation_est, translation_est, _ = cv2.recoverPose(
+            inlier_count, R_est, t_est, _ = cv2.recoverPose(
                 essential,
                 points_left_normalized[inlier_mask],
                 points_right_normalized[inlier_mask],
@@ -459,218 +468,85 @@ def estimate_pose_error_from_points(
             )
         except Exception:
             continue
-
         if inlier_count > best_inlier_count:
             best_inlier_count = int(inlier_count)
-            best_rotation = rotation_est
-            best_translation = translation_est.reshape(-1)
+            best_rotation = R_est
+            best_translation = t_est.reshape(-1)
 
     if best_rotation is None or best_translation is None:
         return float("inf")
 
+    # Step 5 - compare estimated pose to ground truth.
     rotation_gt, translation_gt = ground_truth_relative_pose(left, right)
     rotation_error = angle_error_mat(best_rotation, rotation_gt)
     translation_error = angle_error_vec(best_translation, translation_gt)
+    # Translation is only known up to scale, and recoverPose can return the
+    # direction or its opposite. Taking min(e, 180-e) handles the sign ambiguity.
     if math.isfinite(translation_error):
         translation_error = min(translation_error, 180.0 - translation_error)
 
     total_error = max(rotation_error, translation_error)
-    if not math.isfinite(total_error):
-        return float("inf")
-    return float(total_error)
+    return float(total_error) if math.isfinite(total_error) else float("inf")
 
 
 def pose_auc(errors: Sequence[float], thresholds: Sequence[float]) -> List[float]:
+    """Compute the normalised AUC of the pose-error recall curve at each given threshold.
+
+    The recall curve maps each error threshold t to the fraction of pairs whose
+    pose error is <= t. The AUC is the area under that curve from 0 to the given
+    threshold, divided by the threshold so the result is in [0, 1].
+
+    Failed pairs (inf error) count against recall but are excluded from the sorted
+    array, so they simply reduce the curve's height without distorting its shape.
+    """
     total_pairs = len(errors)
-    values = np.asarray(errors, dtype=np.float64)
+    values = np.sort(np.asarray(errors, dtype=np.float64))
+    # Infinite errors (failed pairs) are excluded from the curve but their count
+    # is kept in total_pairs so they lower the recall fraction.
     values = values[np.isfinite(values)]
 
     if total_pairs == 0:
         return [0.0 for _ in thresholds]
 
-    values = np.sort(values)
+    # Build the recall curve: after sorting, the i-th error value corresponds to
+    # a recall of (i+1) / total_pairs (fraction of pairs at or below that error).
     recall = (np.arange(values.size, dtype=np.float64) + 1.0) / float(total_pairs)
+    # Prepend (0, 0) so the curve starts at the origin.
     values = np.r_[0.0, values]
     recall = np.r_[0.0, recall]
 
     aucs: List[float] = []
     for threshold in thresholds:
-        last_index = int(np.searchsorted(values, threshold, side="right"))
-        if last_index <= 0:
+        # Find where the error axis would exceed the threshold.
+        last = int(np.searchsorted(values, threshold, side="right"))
+        if last <= 0:
             aucs.append(0.0)
             continue
-        interpolated_recall = np.r_[recall[:last_index], recall[last_index - 1]]
-        clipped_errors = np.r_[values[:last_index], threshold]
+        # Clip the curve at the threshold and integrate with the trapezoid rule.
+        # The final point is interpolated by repeating the last recall value up to
+        # the threshold (recall is flat once all finite errors are accounted for).
         aucs.append(
-            float(np.trapezoid(interpolated_recall, x=clipped_errors) / threshold)
+            float(
+                np.trapezoid(
+                    np.r_[recall[:last], recall[last - 1]],
+                    x=np.r_[values[:last], threshold],
+                )
+                / threshold
+            )
         )
     return aucs
 
 
-def compute_recall_curve(
-    errors: Sequence[float], max_threshold_deg: float = 20.0, num_points: int = 400
-) -> Tuple[np.ndarray, np.ndarray]:
-    total_pairs = len(errors)
-    errors_array = np.asarray(errors, dtype=np.float64)
-    finite = errors_array[np.isfinite(errors_array)]
-
-    x_values = np.linspace(0.0, max_threshold_deg, num_points)
-    if total_pairs == 0:
-        return x_values, np.zeros_like(x_values)
-
-    y_values = np.array(
-        [np.sum(finite <= threshold) for threshold in x_values], dtype=np.float64
-    ) / float(total_pairs)
-    return x_values, y_values
-
-
-def paper_color_cycle() -> List[str]:
-    return [
-        "#1f77b4",
-        "#d62728",
-        "#2ca02c",
-        "#9467bd",
-        "#ff7f0e",
-        "#17becf",
-    ]
-
-
-def paper_style() -> None:
-    palette = paper_color_cycle()
-    plt.rcParams.update(
-        {
-            "figure.dpi": 150,
-            "savefig.dpi": 300,
-            "savefig.bbox": "tight",
-            "savefig.pad_inches": 0.03,
-            "pdf.fonttype": 42,
-            "ps.fonttype": 42,
-            "font.family": "serif",
-            "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-            "mathtext.fontset": "dejavuserif",
-            "axes.prop_cycle": cycler(color=palette),
-            "axes.labelsize": 11,
-            "axes.titlesize": 12,
-            "xtick.labelsize": 10,
-            "ytick.labelsize": 10,
-            "legend.fontsize": 9,
-            "axes.linewidth": 0.8,
-            "lines.linewidth": 2.2,
-            "axes.grid": True,
-            "grid.alpha": 0.18,
-            "grid.linewidth": 0.7,
-            "grid.linestyle": "-",
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "legend.frameon": False,
-        }
-    )
-
-
-def save_paper_plots(
-    thresholds: Sequence[float],
-    results: Dict[str, Dict[str, object]],
-    output_dir: Path,
-    prefix: str,
-) -> None:
-    paper_style()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    labels = list(results.keys())
-    colors = paper_color_cycle()
-    color_by_label = {
-        label: colors[index % len(colors)] for index, label in enumerate(labels)
-    }
-
-    max_threshold = float(max(thresholds)) if thresholds else 20.0
-    curve_max = max(20.0, max_threshold)
-
-    recall_path_pdf = output_dir / f"{prefix}_pose_recall_curve.pdf"
-    recall_path_png = output_dir / f"{prefix}_pose_recall_curve.png"
-    fig, ax = plt.subplots(figsize=(6.8, 4.1))
-    for label in labels:
-        x_values, y_values = compute_recall_curve(
-            results[label]["errors"], max_threshold_deg=curve_max
-        )
-        ax.plot(x_values, y_values * 100.0, label=label, color=color_by_label[label])
-    for threshold in thresholds:
-        ax.axvline(
-            float(threshold), color="#777777", linestyle="--", linewidth=0.9, alpha=0.55
-        )
-    ax.set_xlabel("Pose error threshold (degrees)")
-    ax.set_ylabel("Pairs within threshold (%)")
-    ax.set_xlim(0.0, curve_max)
-    ax.set_ylim(0.0, 100.0)
-    ax.set_title("Relative Pose Recall")
-    ax.legend(loc="lower right", ncol=1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(recall_path_pdf)
-    fig.savefig(recall_path_png, dpi=300)
-    plt.close(fig)
-
-    auc_path_pdf = output_dir / f"{prefix}_auc_bars.pdf"
-    auc_path_png = output_dir / f"{prefix}_auc_bars.png"
-    x_positions = np.arange(len(thresholds), dtype=np.float64)
-    width = 0.8 / max(1, len(labels))
-
-    fig, ax = plt.subplots(figsize=(7.3, 4.4))
-    for index, label in enumerate(labels):
-        aucs = np.asarray(results[label]["aucs"], dtype=np.float64) * 100.0
-        offset = (index - (len(labels) - 1) / 2.0) * width
-        ax.bar(
-            x_positions + offset,
-            aucs,
-            width=width,
-            color=color_by_label[label],
-            label=label,
-        )
-
-    tick_labels = [
-        f"AUC@{int(value) if float(value).is_integer() else value}"
-        for value in thresholds
-    ]
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(tick_labels)
-    ax.set_ylabel("AUC (%)")
-    ax.set_ylim(0.0, 100.0)
-    ax.set_title("Relative Pose AUC")
-    ax.legend(loc="upper right", ncol=1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(auc_path_pdf)
-    fig.savefig(auc_path_png, dpi=300)
-    plt.close(fig)
-
-    summary_path = output_dir / f"{prefix}_plot_summary.txt"
-    with summary_path.open("w", encoding="utf-8") as handle:
-        handle.write("Relative Pose Evaluation Plot Summary\n")
-        handle.write("===================================\n")
-        handle.write(
-            f"Total pairs: {len(results[labels[0]]['errors']) if labels else 0}\n"
-        )
-        for label in labels:
-            errors = np.asarray(results[label]["errors"], dtype=np.float64)
-            successful = int(np.isfinite(errors).sum())
-            handle.write(f"{label} successful pairs: {successful}/{len(errors)}\n")
-        handle.write(f"Recall curve PDF: {recall_path_pdf}\n")
-        handle.write(f"AUC bar PDF: {auc_path_pdf}\n")
-
-    print(f"Saved plots to: {output_dir}")
-    print(f"  - {recall_path_pdf.name}")
-    print(f"  - {auc_path_pdf.name}")
-    print(f"  - {summary_path.name}")
-
 
 def make_all_pairs(names: Sequence[str]) -> List[Tuple[str, str]]:
+    """Return all unique unordered image-name pairs."""
     return list(itertools.combinations(names, 2))
 
 
 def make_model_specs(
     selected_keys: Sequence[str], aliked_model_name: str, fine_weights: Path
 ) -> List[ModelSpec]:
+    """Build ModelSpec objects for the requested extractor keys."""
     all_specs: Dict[str, ModelSpec] = {
         "sift": ModelSpec(
             key="sift",
@@ -758,35 +634,25 @@ def make_model_specs(
 def print_comparison_table(
     thresholds: Sequence[float], results: Dict[str, Dict[str, object]]
 ) -> None:
+    """Print a formatted AUC comparison table to stdout."""
     headers = [
-        f"AUC@{int(value) if float(value).is_integer() else value}"
-        for value in thresholds
+        f"AUC@{int(v) if float(v).is_integer() else v}" for v in thresholds
     ]
     header_row = (
-        "Model".ljust(22)
-        + " | "
-        + " | ".join(item.center(10) for item in headers)
-        + " | Success"
+        "Model".ljust(22) + " | " + " | ".join(h.center(10) for h in headers) + " | Success"
     )
-    separator = "-" * len(header_row)
+    sep = "-" * len(header_row)
 
     print("\n=== Relative Pose AUC Comparison ===")
-    print(separator)
+    print(sep)
     print(header_row)
-    print(separator)
-    for model_label, model_result in results.items():
-        aucs = model_result["aucs"]
-        errors = model_result["errors"]
+    print(sep)
+    for label, data in results.items():
+        errors = data["errors"]
         success = int(np.isfinite(np.asarray(errors)).sum())
-        values = [f"{float(score) * 100.0:8.2f}%" for score in aucs]
-        row = (
-            model_label.ljust(22)
-            + " | "
-            + " | ".join(values)
-            + f" | {success}/{len(errors)}"
-        )
-        print(row)
-    print(separator)
+        values = [f"{float(s) * 100.0:8.2f}%" for s in data["aucs"]]
+        print(label.ljust(22) + " | " + " | ".join(values) + f" | {success}/{len(errors)}")
+    print(sep)
 
 
 def evaluate_model(
@@ -801,6 +667,7 @@ def evaluate_model(
     ransac_max_iters: int,
     max_keypoints: int,
 ) -> List[float]:
+    """Extract features, match all pairs, estimate poses, and return per-pair angular errors."""
     print(f"\n[{spec.label}] Extracting features for {len(entries)} images...")
     features_by_name = extract_features_for_entries(
         spec=spec,
@@ -814,17 +681,12 @@ def evaluate_model(
     errors: List[float] = []
 
     for left_name, right_name in tqdm(pairs, desc=f"[{spec.label}] Pairs", leave=False):
-        left_entry = entries_by_name[left_name]
-        right_entry = entries_by_name[right_name]
-        feat_left = features_by_name[left_name]
-        feat_right = features_by_name[right_name]
-
         points_left, points_right = match_features(
-            feat_left, feat_right, ratio=fallback_ratio
+            features_by_name[left_name], features_by_name[right_name], ratio=fallback_ratio
         )
         error = estimate_pose_error_from_points(
-            left=left_entry,
-            right=right_entry,
+            left=entries_by_name[left_name],
+            right=entries_by_name[right_name],
             points_left=points_left,
             points_right=points_right,
             fundamental_threshold_px=fundamental_threshold_px,
@@ -848,33 +710,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-dir",
         type=Path,
-        default=Path(
-            "/zfs-pool/home/xbehoua00/filtered_images/200-400/2024_04_12_11_49_59/"
-        ),
+        default=Path("/zfs-pool/home/xbehoua00/filtered_images/200-400/2024_04_12_11_49_59/"),
         help="Directory containing the images to evaluate.",
     )
     parser.add_argument(
         "--gt-dir",
         type=Path,
-        default=Path(
-            "/zfs-pool/home/xbehoua00/zms-tool/xbehoua00/train/ALIKED/sift-rec-ref/sift/sfm_best/"
-        ),
+        default=Path("/zfs-pool/home/xbehoua00/zms-tool/xbehoua00/train/ALIKED/sift-rec-ref/sift/sfm_best/"),
         help="COLMAP reconstruction directory containing cameras/images model files.",
     )
     parser.add_argument(
         "--fine-weights",
         type=Path,
-        default=Path(
-            "/zfs-pool/home/xbehoua00/recs/aliked_1080p_punisher_ep10_end.pth"
-        ),
+        default=Path("/zfs-pool/home/xbehoua00/recs/aliked_1080p_punisher_ep10_end.pth"),
         help="Path to fine-tuned ALIKED .pth weights.",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="auto",
-        choices=["auto", "aliked-n16", "aliked-n32"],
-        help="ALIKED architecture used by the base and fine-tuned ALIKED models.",
     )
     parser.add_argument(
         "--extractors",
@@ -892,7 +741,7 @@ def parse_args() -> argparse.Namespace:
         "--fallback-ratio",
         type=float,
         default=0.9,
-        help="Lowe ratio threshold for symmetric nearest-neighbor matching.",
+        help="Lowe ratio threshold for symmetric nearest-neighbour matching.",
     )
     parser.add_argument(
         "--fundamental-threshold-px",
@@ -931,16 +780,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("evaluate_cov_metrics.json"),
         help="Where to write the summary metrics JSON.",
     )
-    parser.add_argument(
-        "--plot-prefix",
-        type=str,
-        default="evaluate_cov",
-        help="File prefix for the generated plots.",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
+    """Parse arguments, run evaluation for each extractor, and write results to JSON and plots."""
     args = parse_args()
     thresholds = parse_thresholds(args.thresholds)
     selected_extractors = parse_extractor_list(args.extractors)
@@ -948,32 +792,23 @@ def main() -> None:
     if not args.image_dir.exists():
         raise FileNotFoundError(f"Image directory not found: {args.image_dir}")
     if not args.gt_dir.exists():
-        raise FileNotFoundError(
-            f"Ground-truth reconstruction directory not found: {args.gt_dir}"
-        )
+        raise FileNotFoundError(f"Ground-truth reconstruction directory not found: {args.gt_dir}")
     if not args.fine_weights.exists():
         raise FileNotFoundError(f"Fine-tuned weights not found: {args.fine_weights}")
     if args.max_keypoints <= 0:
         raise ValueError(f"--max-keypoints must be > 0, got {args.max_keypoints}")
 
-    model_name = args.model_name
-    if model_name == "auto":
-        model_name = infer_aliked_model_name_from_weights(args.fine_weights)
-        print(f"Inferred ALIKED architecture from fine-tuned weights: {model_name}")
-
-    model_specs = make_model_specs(selected_extractors, model_name, args.fine_weights)
+    model_specs = make_model_specs(selected_extractors, "aliked-n32", args.fine_weights)
     entries = load_entries(args.image_dir, args.gt_dir)
     if len(entries) < 2:
-        raise RuntimeError(
-            "Need at least 2 images shared between the image directory and GT model."
-        )
+        raise RuntimeError("Need at least 2 images shared between the image directory and GT model.")
 
     pairs = make_all_pairs([entry.name for entry in entries])
     print(f"Loaded {len(entries)} images with GT poses.")
     print(f"Evaluating {len(pairs)} image pairs.")
     print("Evaluating extractors: " + ", ".join(spec.key for spec in model_specs))
     print(
-        "Protocol: IMC paper-style evaluation "
+        f"Protocol: IMC paper-style evaluation "
         f"(symmetric NN-ratio, ratio={args.fallback_ratio}, F-RANSAC, th={args.fundamental_threshold_px}px)"
     )
 
@@ -1000,13 +835,7 @@ def main() -> None:
             ransac_max_iters=args.ransac_max_iters,
             max_keypoints=args.max_keypoints,
         )
-        aucs = pose_auc(errors, thresholds)
-        results[spec.label] = {
-            "key": spec.key,
-            "errors": errors,
-            "aucs": aucs,
-        }
-
+        results[spec.label] = {"key": spec.key, "errors": errors, "aucs": pose_auc(errors, thresholds)}
         del extractor
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1017,27 +846,18 @@ def main() -> None:
     summary = {
         "thresholds": thresholds,
         "models": {
-            model_label: {
-                "key": result["key"],
-                "aucs": result["aucs"],
-                "total_pairs": len(result["errors"]),
-                "successful_pairs": int(
-                    np.isfinite(np.asarray(result["errors"])).sum()
-                ),
+            label: {
+                "key": data["key"],
+                "aucs": data["aucs"],
+                "total_pairs": len(data["errors"]),
+                "successful_pairs": int(np.isfinite(np.asarray(data["errors"])).sum()),
             }
-            for model_label, result in results.items()
+            for label, data in results.items()
         },
     }
-    with args.output_json.open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    with args.output_json.open("w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
     print(f"Saved metrics to: {args.output_json}")
-
-    save_paper_plots(
-        thresholds=thresholds,
-        results=results,
-        output_dir=args.output_json.parent,
-        prefix=args.plot_prefix,
-    )
 
 
 if __name__ == "__main__":

@@ -48,31 +48,23 @@ def paper_style() -> None:
     palette = paper_color_cycle()
     plt.rcParams.update(
         {
-            "figure.figsize": (6.8, 4.1),  # Your original size
-            # Use LaTeX rendering so it matches the document
-            "text.usetex": False,
-            "font.family": "serif",
-            # --- MASSIVE FONT SIZES ---
-            "font.size": 24,  # Base font size
-            "axes.titlesize": 18,  # Plot title
-            "axes.labelsize": 18,  # X and Y axis labels
-            "xtick.labelsize": 18,  # X axis numbers
-            "ytick.labelsize": 18,  # Y axis numbers
-            "legend.fontsize": 18,  # Legend text
-            # --- THICKER LINES ---
-            # Thicker lines are required to balance the huge text
-            "axes.linewidth": 1.5,  # Thicker box around the plot
-            "lines.linewidth": 3.5,  # Thicker data lines
-            # Standard aesthetics
+            "figure.figsize": (6.8, 4.1),
+            "font.size": 24,
+            "axes.titlesize": 18,
+            "axes.labelsize": 18,
+            "xtick.labelsize": 18,
+            "ytick.labelsize": 18,
+            "legend.fontsize": 18,
+            "axes.linewidth": 1.5,
+            "lines.linewidth": 3.5,
             "axes.prop_cycle": cycler(color=palette),
             "axes.grid": True,
-            "grid.alpha": 0.3,  # Darker grid so it doesn't vanish
+            "grid.alpha": 0.3,
             "grid.linewidth": 1.0,
             "grid.linestyle": "--",
             "figure.facecolor": "white",
             "axes.facecolor": "white",
             "legend.frameon": False,
-            # Export settings
             "figure.dpi": 150,
             "savefig.dpi": 300,
             "savefig.bbox": "tight",
@@ -80,8 +72,11 @@ def paper_style() -> None:
         }
     )
 
-
 def parse_numbers(single_number: str, multiple_numbers_raw: str):
+    """Return the list of reconstruction IDs to process.
+
+    If --numbers was given, parse it - otherwise fall back to --number.
+    """
     if not multiple_numbers_raw.strip():
         return [single_number]
     numbers = [
@@ -108,6 +103,7 @@ def build_models(number: str, recon_root: str):
 
 
 def get_model_data(model_path):
+    """Load 3D points from a COLMAP reconstruction, returning (track_length, reprojection_error) pairs."""
     try:
         reconstruction = pycolmap.Reconstruction(model_path)
         data = []
@@ -122,6 +118,12 @@ def get_model_data(model_path):
 
 
 def get_sfm_candidates(model_path):
+    """Return ordered candidate reconstruction paths to try loading.
+
+    Resolves the sfm_best root even if model_path already points into a
+    models/ subfolder, then prepends the root itself before any numbered
+    sub-models so the largest reconstruction is preferred.
+    """
     normalized = os.path.normpath(model_path)
     parent_dir = os.path.dirname(normalized)
     if os.path.basename(parent_dir) == "models":
@@ -156,6 +158,7 @@ def get_sfm_candidates(model_path):
 
 
 def load_best_model_data(model_path):
+    """Return (path, data) for the candidate reconstruction with the most 3D points."""
     candidates = get_sfm_candidates(model_path)
     best_path = None
     best_data = []
@@ -170,6 +173,11 @@ def load_best_model_data(model_path):
 
 
 def aggregate_tl_threshold_curves(numbers, thresholds, recon_root):
+    """Compute per-model TL threshold curves averaged across multiple reconstructions.
+
+    Returns a dict mapping model name to {mean, std, num_runs} arrays over thresholds,
+    where each value is the count of 3D points with track length >= threshold.
+    """
     per_model_curves = {}
 
     for number in numbers:
@@ -191,8 +199,7 @@ def aggregate_tl_threshold_curves(numbers, thresholds, recon_root):
                 per_model_curves[model_name] = []
             per_model_curves[model_name].append(counts_abs)
 
-            if best_path is not None:
-                print(f"  {model_name}: {len(data)} points from {best_path}")
+            print(f"  {model_name}: {len(data)} points from {best_path}")
 
     aggregated = {}
     for model_name, curves in per_model_curves.items():
@@ -230,8 +237,8 @@ def plot_tl_threshold_curve_avg(thresholds, aggregated_curves, output_name):
     ax.set_xlabel("Minimum Track Length", labelpad=8)
     ax.set_ylabel("Number of Points", labelpad=8)
     ax.set_title("Average TL Threshold Curve", pad=10)
-    ax.set_xlim(1, 45)
-    ax.set_xticks(np.arange(1, 46, 4))
+    ax.set_xlim(1, 32)
+    ax.set_xticks(np.arange(1, 33, 4))
     ax.set_yscale("log")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -279,7 +286,7 @@ def parse_args():
 def main():
     args = parse_args()
     numbers = parse_numbers(args.number, args.numbers)
-    thresholds = np.arange(1, 46)
+    thresholds = np.arange(1, 33)
 
     aggregated_curves = aggregate_tl_threshold_curves(
         numbers, thresholds, args.recon_root
