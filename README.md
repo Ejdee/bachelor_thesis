@@ -1,6 +1,6 @@
 # CA-ALIKED: Domain-Adapted Local Feature Extractor for Automotive Surfaces
 
-This repository contains the implementation of the CA-ALIKED pipeline, which fine-tunes the [ALIKED](https://github.com/Shiaoming/ALIKED) feature extractor for 3D reconstruction of reflective vehicle surfaces without manual annotations. The approach uses a multi-model Structure-from-Motion consensus to automatically generate pseudo ground-truth keypoint heatmaps, then fine-tunes only the detection head of ALIKED while keeping the descriptor head frozen.
+This repository contains the implementation of a pipeline, which fine-tunes the [ALIKED](https://github.com/Shiaoming/ALIKED) feature extractor for 3D reconstruction of reflective vehicle surfaces without manual annotations. The approach uses a multi-model Structure-from-Motion consensus to automatically generate pseudo ground-truth keypoint heatmaps, then fine-tunes only the detection head of ALIKED while keeping the descriptor head frozen.
 
 The code is organized into three stages that are meant to be run in sequence:
 
@@ -23,14 +23,37 @@ final/
 │   ├── car_mask_extractor.py      Mask R-CNN vehicle segmentation
 │   └── apply_masks.py             applies masks to images
 ├── training/
-│   ├── train_freeze.py            fine-tuning script (freeze protocol)
+│   ├── train_freeze.py            ← fine-tuning entry point
+│   ├── datasets.py                dataset class for pseudo-GT heatmap training
+│   ├── losses.py                  custom loss for detection head fine-tuning
+│   ├── models.py                  trainable ALIKED wrapper (frozen backbone)
 │   └── sweep_new.py               ClearML hyperparameter sweep
-└── evaluation/
-    ├── evaluate_cov.py            IMC-protocol relative pose evaluation
-    ├── safe_pipeline_independent.py  single-model reconstruction for evaluation
-    ├── re_threshold_curve_avg.py  reprojection error threshold curves
-    └── tl_threshold_curve_avg.py  track length threshold curves
+├── evaluation/
+│   ├── evaluate_cov.py            IMC-protocol relative pose evaluation
+│   ├── safe_pipeline_independent.py  single-model reconstruction for evaluation
+│   ├── re_threshold_curve_avg.py  reprojection error threshold curves
+│   ├── tl_threshold_curve_avg.py  track length threshold curves
+│   └── run_eval_masked.sh         shell script for masked sequence evaluation
+├── data_splits.txt                sequence IDs for train / IMC eval / geometric eval splits
+└── dataset_splits.json            per-sequence frame selection used in experiments
 ```
+
+---
+
+## Dataset
+
+The 3DRealCar dataset sequences used in this thesis are available on Google Drive:
+
+https://drive.google.com/drive/folders/1csYZdO4sJmxV-tMQRPPVSiSp53_3y6fG
+
+To download via command line:
+
+```bash
+pip install gdown
+gdown --folder https://drive.google.com/drive/folders/1csYZdO4sJmxV-tMQRPPVSiSp53_3y6fG
+```
+
+`data_splits.txt` lists the sequence IDs for each split (training, IMC evaluation, geometric evaluation). `dataset_splits.json` records the exact per-sequence frame selection used in the thesis experiments.
 
 ---
 
@@ -68,8 +91,6 @@ python -m pip install -e detectron2
 git clone https://github.com/Shiaoming/ALIKED.git ALIKED
 ```
 
-Clone ALIKED into the `ALIKED/` directory at the repository root. The code is used as-is with no modifications.
-
 **Step 4 - everything else**
 
 ```bash
@@ -97,7 +118,7 @@ python preprocessing/run_preprocessing.py \
 | 1/5 | Extract car masks with 5px dilation (used later for pseudo-GT filtering) |
 | 2/5 | Extract car masks with 10px dilation (used for background removal) |
 | 3/5 | Apply 10px masks to images (black out background) |
-| 4/5 | Run multi-model SfM — DISK does full reconstruction, others triangulate against DISK geometry |
+| 4/5 | Run multi-model SfM - DISK does full reconstruction, others triangulate against DISK geometry |
 | 5/5 | Classify 3D points by quality (track length, reprojection error, cross-model agreement) and generate heatmaps |
 
 **Output directory layout:**
@@ -121,8 +142,6 @@ output/
 | `--score-thresh` | `0.5` | Quality score threshold for pseudo-GT point filtering |
 | `--recon-attempts` | `10` | Max SfM retry attempts per model |
 
-Run `run_preprocessing.py` once per vehicle sequence. Repeat for as many sequences as you want to include in training.
-
 ---
 
 ## 2. Training
@@ -131,63 +150,25 @@ Fine-tunes the ALIKED detection head on the generated pseudo-GT. Requires [Clear
 
 ```bash
 python training/train_freeze.py \
-    --frames-root      /path/to/frames_root \
+    --frames-root       /path/to/frames_root \
     --preprocessed-root /path/to/outputs_root \
-    --checkpoint-dir   checkpoints/
+    --checkpoint-dir    checkpoints/
 ```
 
-`--frames-root` should contain per-sequence subdirectories with the original images.  
-`--preprocessed-root` should contain the matching per-sequence subdirectories produced by preprocessing (each with `masked/`, `heatmaps/`, `valid_masks/`).
+Both roots must contain matching per-sequence subdirectories:
 
-The script matches datasets by sequence folder name. In other words, if a sequence is named `2024_04_09_16_34_06`, both roots must contain that same subfolder.
-
-Expected layout:
 ```
 frames_root/
-    2024_04_09_16_34_06/
-        frame_00000.jpg
-        ...
-    2024_04_10_09_12_44/
-        ...
+    sequence_A/         ← original frames
+    sequence_B/
 
 outputs_root/
-    2024_04_09_16_34_06/
+    sequence_A/         ← output from run_preprocessing.py
         masked/
         heatmaps/
         valid_masks/
-    2024_04_10_09_12_44/
-        masked/
-        heatmaps/
-        valid_masks/
-```
-
-Important: do **not** pass a flat preprocessing folder that directly contains `heatmaps/`, `masked/`, and `valid_masks/` at its top level. Create one sequence subfolder first.
-
-If you currently have a flat single-sequence output, restructure it like this:
-```bash
-SEQ=2024_04_09_16_34_06
-mkdir -p /path/to/outputs_root/$SEQ
-mv /path/to/flat_output/heatmaps /path/to/outputs_root/$SEQ/
-mv /path/to/flat_output/valid_masks /path/to/outputs_root/$SEQ/
-mv /path/to/flat_output/masked /path/to/outputs_root/$SEQ/
-```
-
-Then run training with:
-```bash
-python training/train_freeze.py \
-    --frames-root /path/to/frames_root \
-    --preprocessed-root /path/to/outputs_root \
-    --checkpoint-dir checkpoints/
-```
-
-For example, if you ran preprocessing on two sequences:
-```
-frames_root/
-    sequence_A/    ← original frames
     sequence_B/
-outputs_root/
-    sequence_A/    ← output from run_preprocessing.py
-    sequence_B/
+        ...
 ```
 
 **Key training arguments:**
@@ -213,8 +194,8 @@ Evaluates keypoint-based pose accuracy on masked vehicle sequences against SIFT-
 
 ```bash
 python evaluation/evaluate_cov.py \
-    --image-dir /path/to/sequence/masked \
-    --gt-dir    /path/to/sift_reference/sfm_best \
+    --image-dir    /path/to/sequence/masked \
+    --gt-dir       /path/to/sift_reference/sfm_best \
     --fine-weights /path/to/aliked_ep10_end.pth
 ```
 
@@ -222,53 +203,40 @@ Outputs AUC at 5°, 10°, and 20° thresholds, plus a bar chart and recall curve
 
 ### RE / TL threshold curves
 
-Compares reprojection error and track length distributions across models for multiple reconstructions.
+Compares reprojection error and track length distributions across models.
 
 ```bash
 # Reprojection error curves
 python evaluation/re_threshold_curve_avg.py \
-    --recon-root /path/to/reconstructions \
-    --numbers "seq1 seq2 seq3" \
+    --recon-root  /path/to/reconstructions \
+    --numbers     "seq1 seq2 seq3" \
     --output-name figure_re.pdf
 
 # Track length curves
 python evaluation/tl_threshold_curve_avg.py \
-    --recon-root /path/to/reconstructions \
-    --numbers "seq1 seq2 seq3" \
+    --recon-root  /path/to/reconstructions \
+    --numbers     "seq1 seq2 seq3" \
     --output-name figure_tl.pdf
 ```
 
 `--recon-root` should be a directory where each subdirectory named by a sequence ID contains `aliked/sfm_best`, `disk/sfm_best`, etc.
 
-### Single-model reconstruction (for evaluation sequences)
+### Single-model reconstruction
 
-Runs the CA-ALIKED model through the full SfM pipeline to produce a reconstruction for evaluation.
+Runs CA-ALIKED through the full SfM pipeline to produce a reconstruction for evaluation.
 
 ```bash
 python evaluation/safe_pipeline_independent.py \
-    --images /path/to/masked/images \
-    --output /path/to/output \
+    --images         /path/to/masked/images \
+    --output         /path/to/recon_root/<sequence_id> \
     --aliked_weights /path/to/aliked_ep10_end.pth
 ```
 
-Recommended convention for compatibility with the RE/TL curve scripts:
+For compatibility with the RE/TL curve scripts, set `--output` to `recon_root/<sequence_id>`. This produces:
 
-Run this once per sequence, and set `--output` to `recon_root/<sequence_id>`.
-
-Example:
-```bash
-python evaluation/safe_pipeline_independent.py \
-    --images /data/masked/2024_04_09_16_34_06 \
-    --output /data/recon_root/2024_04_09_16_34_06 \
-    --aliked_weights checkpoints/aliked_ep10_end.pth
 ```
-
-This produces model folders like:
-```
-/data/recon_root/2024_04_09_16_34_06/
+recon_root/sequence_id/
     aliked_custom_lg/
         sfm_best/
         sfm-triangulation/
 ```
-
-Then for curve plotting, use sequence IDs as `--numbers` and `recon_root` as `--recon-root`.
