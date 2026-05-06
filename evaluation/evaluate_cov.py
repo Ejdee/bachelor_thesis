@@ -527,7 +527,7 @@ def pose_auc(errors: Sequence[float], thresholds: Sequence[float]) -> List[float
         # the threshold (recall is flat once all finite errors are accounted for).
         aucs.append(
             float(
-                np.trapezoid(
+                np.trapz(
                     np.r_[recall[:last], recall[last - 1]],
                     x=np.r_[values[:last], threshold],
                 )
