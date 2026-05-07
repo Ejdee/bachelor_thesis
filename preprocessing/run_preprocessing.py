@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
-"""
-Preprocessing pipeline for CA-ALIKED domain adaptation.
-
-Runs all stages in order on a single vehicle image sequence:
-  1. Car mask extraction with 5px dilation  (used for filtering in pseudo-GT)
-  2. Car mask extraction with 10px dilation (used for reconstruction)
-  3. Apply 10px masks to images             (background removal)
-  4. Multi-model SfM reconstruction         (DISK-referenced geometry)
-  5. Pseudo ground-truth heatmap generation (point classification)
-
-Usage:
-    python run_preprocessing.py --images /path/to/images --output /path/to/output
-
-After this script finishes, the output directory will contain:
-    masks/dilate_5/       binary masks with 5px dilation
-    masks/dilate_10/      binary masks with 10px dilation
-    masked/               background-removed images
-    reconstructions/      per-model SfM outputs (aliked, disk, sift, superpoint, r2d2)
-    heatmaps/             pseudo-GT heatmaps (.npy) for training
-    valid_masks/          training region masks (.npy) for training
-"""
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Runs the preprocessing pipeline end to end.
+============================================================================="""
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
+import shutil
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-
 
 def run_stage(name, cmd):
     import subprocess
@@ -186,7 +170,6 @@ def main():
         ],
     )
 
-    # point_classification.py writes masks/ but training expects valid_masks/
     masks_src = output_dir / "masks"
     masks_dst = output_dir / "valid_masks"
     if masks_src.exists():

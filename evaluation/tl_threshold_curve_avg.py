@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Aggregates track-length threshold curves.
+============================================================================="""
+
 import os
 import re
 import argparse

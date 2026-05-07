@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: SfM pipeline that runs multiple models with retries and selects the best reconstruction for each, then triangulates all models against a shared reference geometry.
+============================================================================="""
+
 from pathlib import Path
 import copy
 import pycolmap
@@ -6,7 +13,7 @@ import sys
 import argparse
 import os
 
-# hloc lives one level up from this script (final/hloc/)
+# hloc lives one level up from this script (src/hloc/)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hloc"))
 from hloc import (
     extract_features,

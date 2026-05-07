@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Applies binary masks to image frames.
+============================================================================="""
+
 import argparse
 import sys
 from pathlib import Path

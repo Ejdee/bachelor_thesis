@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Dataset helpers for car keypoint training.
+============================================================================="""
+
 from pathlib import Path
 import torch
 import cv2

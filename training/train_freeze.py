@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Training entrypoint for ALIKED fine-tuning.
+============================================================================="""
+
 import sys
 import argparse
 import random

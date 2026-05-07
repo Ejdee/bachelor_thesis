@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Extracts car masks with Detectron2.
+============================================================================="""
+
 import cv2
 from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg

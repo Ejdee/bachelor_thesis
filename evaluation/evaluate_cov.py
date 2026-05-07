@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Evaluates relative pose estimation performance of feature extractors by computing AUC of pose error curves.
+============================================================================="""
+
 from __future__ import annotations
 
 import argparse

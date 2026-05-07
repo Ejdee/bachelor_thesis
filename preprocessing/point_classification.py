@@ -1,3 +1,10 @@
+"""=============================================================================
+Project:     Accurate and Robust Localization of Landmarks on a Vehicle
+Author:      Adam Běhoun <xbehoua00@vutbr.cz>
+Year:        2026
+Description: Preprocesses COLMAP reconstructions to identify reliable 3D points for training the ALIKED detection head.
+============================================================================="""
+
 from pathlib import Path
 import pycolmap
 import numpy as np
