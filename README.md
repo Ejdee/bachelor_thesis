@@ -16,6 +16,10 @@ preprocessing/   →   training/   →   evaluation/
 final/
 ├── ALIKED/                        ALIKED source (clone separately — see Dependencies)
 ├── hloc/                          Hierarchical Localization source (local, modified)
+├── dataset/                       dataset download goes here (see Dataset section)
+│   ├── train/                     unmasked training sequences
+│   ├── imc_eval/                  pre-masked sequences for IMC pose evaluation
+│   └── geo_eval/                  pre-masked sequences for RE / TL curve evaluation
 ├── preprocessing/
 │   ├── run-preprocessing.py       ← single entry-point for the full preprocessing pipeline
 │   ├── multi-model-sfm-pipeline.py multi-model SfM reconstruction
@@ -30,7 +34,7 @@ final/
 │   └── clearml-hyperparameter-sweep.py ClearML hyperparameter sweep
 ├── evaluation/
 │   ├── imc-pose-evaluation.py     IMC-protocol relative pose evaluation
-│   ├── single-model-sfm.py        single-model reconstruction for evaluation
+│   ├── safe_pipeline_independent.py  ← SfM reconstruction entry point (all models or subset)
 │   ├── reprojection-error-curves.py reprojection error threshold curves
 │   ├── track-length-curves.py     track length threshold curves
 │   └── run_eval_masked.sh         shell script for masked sequence evaluation
@@ -42,18 +46,32 @@ final/
 
 ## Dataset
 
-The 3DRealCar dataset sequences used in this thesis are available on Google Drive:
+The dataset is published on Zenodo: **https://doi.org/10.5281/zenodo.20082225**
 
-https://drive.google.com/drive/folders/1csYZdO4sJmxV-tMQRPPVSiSp53_3y6fG
-
-To download via command line:
+Download and extract at the repository root:
 
 ```bash
-pip install gdown
-gdown --folder https://drive.google.com/drive/folders/1csYZdO4sJmxV-tMQRPPVSiSp53_3y6fG
+unzip dataset.zip
 ```
 
-`data_splits.txt` lists the sequence IDs for each split (training, IMC evaluation, geometric evaluation). `dataset_splits.json` records the exact per-sequence frame selection used in the thesis experiments.
+After extraction the layout should be:
+
+```
+dataset/
+├── train/
+│   ├── 2024_04_09_16_34_06/    ← unmasked frames; input to preprocessing
+│   └── ...
+├── imc_eval/
+│   ├── 2024_04_11_16_33_46/    ← pre-masked frames; input to IMC evaluation
+│   └── ...
+└── geo_eval/
+    ├── 2024_07_09_16_48_13/    ← pre-masked frames; input to RE / TL evaluation
+    └── ...
+```
+
+`imc_eval/` and `geo_eval/` images are already masked - no preprocessing needed for them. `train/` sequences must go through the preprocessing pipeline first to generate pseudo-GT heatmaps.
+
+`data_splits.txt` lists the sequence IDs for each split. `dataset_splits.json` records the exact per-sequence frame selection used in the thesis experiments.
 
 ---
 
@@ -108,12 +126,12 @@ pip install -r requirements.txt
 
 ## 1. Preprocessing
 
-Takes a folder of raw vehicle images and produces pseudo-GT heatmaps for training.
+Takes a folder of raw vehicle images and produces pseudo-GT heatmaps for training. Run once per training sequence:
 
 ```bash
 python preprocessing/run-preprocessing.py \
-    --images /path/to/sequence/frames \
-    --output /path/to/output
+    --images dataset/train/<sequence_id> \
+    --output preprocessed/<sequence_id>
 ```
 
 **What it does, in order:**
@@ -135,8 +153,8 @@ output/
 │   └── dilate_10/         binary masks (10px)
 ├── masked/                background-removed images
 ├── reconstructions/       per-model SfM output (aliked/, disk/, sift/, superpoint/, r2d2/)
-├── heatmaps/              pseudo-GT heatmaps (.npy) — input to training
-└── valid_masks/           training region masks (.npy) — input to training
+├── heatmaps/              pseudo-GT heatmaps (.npy) - input to training
+└── valid_masks/           training region masks (.npy) - input to training
 ```
 
 **Optional arguments:**
@@ -155,25 +173,23 @@ Fine-tunes the ALIKED detection head on the generated pseudo-GT. Requires [Clear
 
 ```bash
 python training/train-freeze-protocol.py \
-    --frames-root       /path/to/frames_root \
-    --preprocessed-root /path/to/outputs_root \
+    --frames-root       dataset/train \
+    --preprocessed-root preprocessed/ \
     --checkpoint-dir    checkpoints/
 ```
 
-Both roots must contain matching per-sequence subdirectories:
+`--frames-root` points to the unmasked training sequences; `--preprocessed-root` points to the directory produced by the preprocessing step. Both must contain matching per-sequence subdirectories:
 
 ```
-frames_root/
-    sequence_A/         ← original frames
-    sequence_B/
+dataset/train/
+    2024_04_09_16_34_06/    ← original frames
 
-outputs_root/
-    sequence_A/         ← output from run-preprocessing.py
+preprocessed/
+    2024_04_09_16_34_06/    ← output from run-preprocessing.py
         masked/
         heatmaps/
         valid_masks/
-    sequence_B/
-        ...
+    ...
 ```
 
 **Key training arguments:**
@@ -193,55 +209,92 @@ Checkpoints are saved to `--checkpoint-dir/<clearml_task_id>/` after each epoch.
 
 ## 3. Evaluation
 
+Both evaluation protocols require building SfM reconstructions first using `safe_pipeline_independent.py`. This script runs any subset of the seven baseline models on a single masked sequence:
+
+| Model key | Method |
+|-----------|--------|
+| `sift` | SIFT + NN ratio |
+| `disk` | DISK + LightGlue |
+| `superpoint` | SuperPoint + LightGlue |
+| `aliked` | ALIKED-n16 + LightGlue |
+| `aliked_custom_lg` | CA-ALIKED (fine-tuned) + LightGlue |
+| `r2d2` | R2D2 + NN mutual |
+| `loftr` | LoFTR (dense) |
+
+```bash
+python evaluation/safe_pipeline_independent.py \
+    --images          <path/to/masked/sequence> \
+    --output          <output_dir> \
+    --aliked_weights  checkpoints/aliked_ep10_end.pth \
+    --models          <model_key> [<model_key> ...]   # omit to run all
+```
+
+Output per model:
+
+```
+<output_dir>/
+    <model_key>/
+        sfm_best/           ← best reconstruction (used by evaluation scripts)
+        sfm-triangulation/  ← intermediate output
+```
+
+---
+
 ### Relative pose estimation (IMC protocol)
 
-Evaluates keypoint-based pose accuracy on masked vehicle sequences against SIFT-based ground truth.
+The SIFT ground truth and CA-ALIKED reconstructions are not included in the dataset and must be built first. Run on each `imc_eval` sequence:
+
+```bash
+# Build SIFT ground truth
+python evaluation/safe_pipeline_independent.py \
+    --images dataset/imc_eval/<sequence_id> \
+    --output reconstructions/<sequence_id> \
+    --models sift
+
+# Build CA-ALIKED reconstruction
+python evaluation/safe_pipeline_independent.py \
+    --images         dataset/imc_eval/<sequence_id> \
+    --output         reconstructions/<sequence_id> \
+    --aliked_weights checkpoints/aliked_ep10_end.pth \
+    --models         aliked_custom_lg
+```
+
+Then evaluate, pointing `--gt-dir` at the SIFT result:
 
 ```bash
 python evaluation/imc-pose-evaluation.py \
-    --image-dir    /path/to/sequence/masked \
-    --gt-dir       /path/to/sift_reference/sfm_best \
-    --fine-weights /path/to/aliked_ep10_end.pth
+    --image-dir    dataset/imc_eval/<sequence_id> \
+    --gt-dir       reconstructions/<sequence_id>/sift/sfm_best \
+    --fine-weights checkpoints/aliked_ep10_end.pth
 ```
 
 Outputs AUC at 5°, 10°, and 20° thresholds, plus a bar chart and recall curve saved to the current directory.
 
+---
+
 ### RE / TL threshold curves
 
-Compares reprojection error and track length distributions across models.
+All seven model reconstructions must be built for each `geo_eval` sequence. Run on each sequence:
+
+```bash
+python evaluation/safe_pipeline_independent.py \
+    --images         dataset/geo_eval/<sequence_id> \
+    --output         reconstructions/<sequence_id> \
+    --aliked_weights checkpoints/aliked_ep10_end.pth
+```
+
+Then plot the curves across all five sequences:
 
 ```bash
 # Reprojection error curves
 python evaluation/reprojection-error-curves.py \
-    --recon-root  /path/to/reconstructions \
-    --numbers     "seq1 seq2 seq3" \
+    --recon-root  reconstructions/ \
+    --numbers     "2024_07_09_16_48_13 2024_06_30_14_18_10 2024_07_09_05_42_44 2024_07_09_16_43_11 2024_07_02_14_29_47" \
     --output-name figure_re.pdf
 
 # Track length curves
 python evaluation/track-length-curves.py \
-    --recon-root  /path/to/reconstructions \
-    --numbers     "seq1 seq2 seq3" \
+    --recon-root  reconstructions/ \
+    --numbers     "2024_07_09_16_48_13 2024_06_30_14_18_10 2024_07_09_05_42_44 2024_07_09_16_43_11 2024_07_02_14_29_47" \
     --output-name figure_tl.pdf
-```
-
-`--recon-root` should be a directory where each subdirectory named by a sequence ID contains `aliked/sfm_best`, `disk/sfm_best`, etc.
-
-### Single-model reconstruction
-
-Runs CA-ALIKED through the full SfM pipeline to produce a reconstruction for evaluation.
-
-```bash
-python evaluation/single-model-sfm.py \
-    --images         /path/to/masked/images \
-    --output         /path/to/recon_root/<sequence_id> \
-    --aliked_weights /path/to/aliked_ep10_end.pth
-```
-
-For compatibility with the RE/TL curve scripts, set `--output` to `recon_root/<sequence_id>`. This produces:
-
-```
-recon_root/sequence_id/
-    aliked_custom_lg/
-        sfm_best/
-        sfm-triangulation/
 ```
