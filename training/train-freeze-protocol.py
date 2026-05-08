@@ -22,9 +22,9 @@ import matplotlib.pyplot as plt
 from clearml import Task, Logger
 from torch.optim.lr_scheduler import OneCycleLR
 
-from models import TrainableALIKED
-from losses import CarFeaturePunisherLoss
-from datasets import CarKeypointDataset
+from aliked_frozen_wrapper import TrainableALIKED
+from piecewise_semantic_loss import CarFeaturePunisherLoss
+from pseudogt_dataset import CarKeypointDataset
 
 parser = argparse.ArgumentParser(
     description="Fine-tune the ALIKED detection head on automotive data"

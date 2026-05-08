@@ -17,22 +17,22 @@ final/
 ├── ALIKED/                        ALIKED source (clone separately — see Dependencies)
 ├── hloc/                          Hierarchical Localization source (local, modified)
 ├── preprocessing/
-│   ├── run_preprocessing.py       ← single entry-point for the full preprocessing pipeline
-│   ├── pipeline_combined.py       multi-model SfM reconstruction
-│   ├── point_classification.py    pseudo-GT heatmap generation
-│   ├── car_mask_extractor.py      Mask R-CNN vehicle segmentation
-│   └── apply_masks.py             applies masks to images
+│   ├── run-preprocessing.py       ← single entry-point for the full preprocessing pipeline
+│   ├── multi-model-sfm-pipeline.py multi-model SfM reconstruction
+│   ├── pseudogt-scoring.py        pseudo-GT heatmap generation
+│   ├── mask-rcnn-extractor.py     Mask R-CNN vehicle segmentation
+│   └── apply-masks.py             applies masks to images
 ├── training/
-│   ├── train_freeze.py            ← fine-tuning entry point
-│   ├── datasets.py                dataset class for pseudo-GT heatmap training
-│   ├── losses.py                  custom loss for detection head fine-tuning
-│   ├── models.py                  trainable ALIKED wrapper (frozen backbone)
-│   └── sweep_new.py               ClearML hyperparameter sweep
+│   ├── train-freeze-protocol.py   ← fine-tuning entry point
+│   ├── pseudogt_dataset.py        dataset class for pseudo-GT heatmap training
+│   ├── piecewise_semantic_loss.py custom loss for detection head fine-tuning
+│   ├── aliked_frozen_wrapper.py   trainable ALIKED wrapper (frozen backbone)
+│   └── clearml-hyperparameter-sweep.py ClearML hyperparameter sweep
 ├── evaluation/
-│   ├── evaluate_cov.py            IMC-protocol relative pose evaluation
-│   ├── safe_pipeline_independent.py  single-model reconstruction for evaluation
-│   ├── re_threshold_curve_avg.py  reprojection error threshold curves
-│   ├── tl_threshold_curve_avg.py  track length threshold curves
+│   ├── imc-pose-evaluation.py     IMC-protocol relative pose evaluation
+│   ├── single-model-sfm.py        single-model reconstruction for evaluation
+│   ├── reprojection-error-curves.py reprojection error threshold curves
+│   ├── track-length-curves.py     track length threshold curves
 │   └── run_eval_masked.sh         shell script for masked sequence evaluation
 ├── data_splits.txt                sequence IDs for train / IMC eval / geometric eval splits
 └── dataset_splits.json            per-sequence frame selection used in experiments
@@ -111,7 +111,7 @@ pip install -r requirements.txt
 Takes a folder of raw vehicle images and produces pseudo-GT heatmaps for training.
 
 ```bash
-python preprocessing/run_preprocessing.py \
+python preprocessing/run-preprocessing.py \
     --images /path/to/sequence/frames \
     --output /path/to/output
 ```
@@ -154,7 +154,7 @@ output/
 Fine-tunes the ALIKED detection head on the generated pseudo-GT. Requires [ClearML](https://clear.ml/) for experiment tracking (free account).
 
 ```bash
-python training/train_freeze.py \
+python training/train-freeze-protocol.py \
     --frames-root       /path/to/frames_root \
     --preprocessed-root /path/to/outputs_root \
     --checkpoint-dir    checkpoints/
@@ -168,7 +168,7 @@ frames_root/
     sequence_B/
 
 outputs_root/
-    sequence_A/         ← output from run_preprocessing.py
+    sequence_A/         ← output from run-preprocessing.py
         masked/
         heatmaps/
         valid_masks/
@@ -198,7 +198,7 @@ Checkpoints are saved to `--checkpoint-dir/<clearml_task_id>/` after each epoch.
 Evaluates keypoint-based pose accuracy on masked vehicle sequences against SIFT-based ground truth.
 
 ```bash
-python evaluation/evaluate_cov.py \
+python evaluation/imc-pose-evaluation.py \
     --image-dir    /path/to/sequence/masked \
     --gt-dir       /path/to/sift_reference/sfm_best \
     --fine-weights /path/to/aliked_ep10_end.pth
@@ -212,13 +212,13 @@ Compares reprojection error and track length distributions across models.
 
 ```bash
 # Reprojection error curves
-python evaluation/re_threshold_curve_avg.py \
+python evaluation/reprojection-error-curves.py \
     --recon-root  /path/to/reconstructions \
     --numbers     "seq1 seq2 seq3" \
     --output-name figure_re.pdf
 
 # Track length curves
-python evaluation/tl_threshold_curve_avg.py \
+python evaluation/track-length-curves.py \
     --recon-root  /path/to/reconstructions \
     --numbers     "seq1 seq2 seq3" \
     --output-name figure_tl.pdf
@@ -231,7 +231,7 @@ python evaluation/tl_threshold_curve_avg.py \
 Runs CA-ALIKED through the full SfM pipeline to produce a reconstruction for evaluation.
 
 ```bash
-python evaluation/safe_pipeline_independent.py \
+python evaluation/single-model-sfm.py \
     --images         /path/to/masked/images \
     --output         /path/to/recon_root/<sequence_id> \
     --aliked_weights /path/to/aliked_ep10_end.pth

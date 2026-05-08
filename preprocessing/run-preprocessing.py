@@ -78,7 +78,7 @@ def main():
         "Stage 1/5 — Mask extraction (5px dilation)",
         [
             sys.executable,
-            str(SCRIPTS_DIR / "car_mask_extractor.py"),
+            str(SCRIPTS_DIR / "mask-rcnn-extractor.py"),
             "--img",
             str(images_dir),
             "--dilate",
@@ -99,7 +99,7 @@ def main():
         "Stage 2/5 — Mask extraction (10px dilation)",
         [
             sys.executable,
-            str(SCRIPTS_DIR / "car_mask_extractor.py"),
+            str(SCRIPTS_DIR / "mask-rcnn-extractor.py"),
             "--img",
             str(images_dir),
             "--dilate",
@@ -120,7 +120,7 @@ def main():
         "Stage 3/5 — Apply masks to images",
         [
             sys.executable,
-            str(SCRIPTS_DIR / "apply_masks.py"),
+            str(SCRIPTS_DIR / "apply-masks.py"),
             "--image-dir",
             str(images_dir),
             "--mask-dir",
@@ -137,7 +137,7 @@ def main():
         "Stage 4/5 — Multi-model SfM reconstruction",
         [
             sys.executable,
-            str(SCRIPTS_DIR / "pipeline_combined.py"),
+            str(SCRIPTS_DIR / "multi-model-sfm-pipeline.py"),
             "--images",
             str(masked_dir),
             "--output",
@@ -154,7 +154,7 @@ def main():
         "Stage 5/5 — Pseudo-GT heatmap generation",
         [
             sys.executable,
-            str(SCRIPTS_DIR / "point_classification.py"),
+            str(SCRIPTS_DIR / "pseudogt-scoring.py"),
             "--dataset",
             str(images_dir),
             "--masks",

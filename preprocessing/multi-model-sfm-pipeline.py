@@ -13,7 +13,7 @@ import sys
 import argparse
 import os
 
-# hloc lives one level up from this script (src/hloc/)
+# hloc lives one level up from this script
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hloc"))
 from hloc import (
     extract_features,

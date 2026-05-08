@@ -13,7 +13,7 @@ for folder in 2024_04_11_16_33_46 2024_04_12_08_22_26 2024_04_12_11_49_59 2024_0
 
     output_dir=/zfs-pool/home/xbehoua00/imc/evaluation/$folder
 
-    python evaluate_cov.py \
+    python imc-pose-evaluation.py \
         --image-dir /zfs-pool/home/xbehoua00/imc/dataset/$folder/masked/ \
         --gt-dir /zfs-pool/home/xbehoua00/imc/rec-sift/$folder/sift/sfm_best/ \
         --output-json "$output_dir/metrics.json" \
